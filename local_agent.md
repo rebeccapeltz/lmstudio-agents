@@ -99,7 +99,6 @@ def fetch_url(url: str, max_chars: int = 3000) -> str:
     anything from the fetched content, only pass it back as text for the
     model to read.
     """
-    print("URL fetch:", url)
     try:
         resp = requests.get(
             url,
@@ -108,7 +107,6 @@ def fetch_url(url: str, max_chars: int = 3000) -> str:
         )
         resp.raise_for_status()
         text = resp.text
-        print("Response text:", text)
         return text[:max_chars]
     except requests.RequestException as e:
         return f"[fetch_url error] {e}"
