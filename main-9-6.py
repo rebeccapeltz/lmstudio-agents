@@ -14,31 +14,33 @@ def save_note_to_disk(
     content: str, filename: str, folder: str, tags: list[str] | str
 ) -> str:
   """Saves a specific learning concept or AI answer to a local markdown file."""
-  # Normalize tags if the LLM returns a stringified list instead of a native list
-  if isinstance(tags, str):
-    tags_str = tags.strip()
-    if tags_str.startswith("[") and tags_str.endswith("]"):
-      try:
-        parsed = ast.literal_eval(tags_str)
-        tags = parsed if isinstance(parsed, list) else [tags_str]
-      except Exception:
-        tags = [t.strip() for t in tags_str.strip("[]").split(",") if t.strip()]
-    else:
-      tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+  try:
+    if isinstance(tags, str):
+      tags_str = tags.strip()
+      if tags_str.startswith("[") and tags_str.endswith("]"):
+        try:
+          parsed = ast.literal_eval(tags_str)
+          tags = parsed if isinstance(parsed, list) else [tags_str]
+        except Exception:
+          tags = [
+              t.strip() for t in tags_str.strip("[]").split(",") if t.strip()
+          ]
+      else:
+        tags = [t.strip() for t in tags_str.split(",") if t.strip()]
 
-  clean_folder = re.sub(r"[^\w\s-]", "", folder).strip()
-  clean_filename = re.sub(r"[^\w\s.-]", "", filename).strip()
-  if not clean_filename.endswith(".md"):
-    clean_filename += ".md"
+    clean_folder = re.sub(r"[^\w\s-]", "", folder).strip()
+    clean_filename = re.sub(r"[^\w\s.-]", "", filename).strip()
+    if not clean_filename.endswith(".md"):
+      clean_filename += ".md"
 
-  target_dir = BASE_DIR / clean_folder
-  target_dir.mkdir(parents=True, exist_ok=True)
-  file_path = target_dir / clean_filename
+    target_dir = BASE_DIR / clean_folder
+    target_dir.mkdir(parents=True, exist_ok=True)
+    file_path = target_dir / clean_filename
 
-  clean_tags = [re.sub(r"[^\w\s-]", "", str(tag)).strip() for tag in tags]
-  formatted_tags = ", ".join(f'"{t}"' for t in clean_tags if t)
+    clean_tags = [re.sub(r"[^\w\s-]", "", str(tag)).strip() for tag in tags]
+    formatted_tags = ", ".join(f'"{t}"' for t in clean_tags if t)
 
-  markdown_template = f"""---
+    markdown_template = f"""---
 category: {clean_folder}
 tags: [{formatted_tags}]
 ---
@@ -46,36 +48,44 @@ tags: [{formatted_tags}]
 
 {content.strip()}
 """
-  with open(file_path, "w", encoding="utf-8") as f:
-    f.write(markdown_template)
+    with open(file_path, "w", encoding="utf-8") as f:
+      f.write(markdown_template)
 
-  return f"Success: Note saved successfully to {file_path}"
+    return f"Success: Note saved successfully to {file_path}"
+  except Exception as e:
+    return f"Error saving file: {str(e)}"
 
 
 def list_context_files() -> str:
   """Lists all available markdown files in the local knowledge base."""
-  if not BASE_DIR.exists():
-    return "Directory ./my_knowledge_base is empty or does not exist."
+  try:
+    if not BASE_DIR.exists():
+      return "Directory ./my_knowledge_base is empty or does not exist."
 
-  files = [str(f.relative_to(BASE_DIR)) for f in BASE_DIR.glob("**/*.md")]
-  if not files:
-    return "No markdown files found in ./my_knowledge_base."
+    files = [str(f.relative_to(BASE_DIR)) for f in BASE_DIR.glob("**/*.md")]
+    if not files:
+      return "No markdown files found in ./my_knowledge_base."
 
-  return "Available markdown files:\n" + "\n".join(files)
+    return "Available markdown files:\n" + "\n".join(files)
+  except Exception as e:
+    return f"Error listing files: {str(e)}"
 
 
 def read_context_file(relative_path: str) -> str:
-  """Reads the text content of a specific local markdown file."""
-  target_file = (BASE_DIR / relative_path).resolve()
+  """Reads the text content of a specific local markdown file safely."""
+  try:
+    target_file = (BASE_DIR / relative_path).resolve()
 
-  # Ensure path stays within base directory
-  if not str(target_file).startswith(str(BASE_DIR.resolve())):
-    return "Error: Access outside the base directory is forbidden."
+    # Safety check: path traversal prevention
+    if not str(target_file).startswith(str(BASE_DIR.resolve())):
+      return "Error: Access outside the base directory is forbidden."
 
-  if not target_file.exists():
-    return f"Error: File '{relative_path}' not found."
+    if not target_file.exists():
+      return f"Error: File '{relative_path}' not found."
 
-  return target_file.read_text(encoding="utf-8")
+    return target_file.read_text(encoding="utf-8")
+  except Exception as e:
+    return f"Error reading file '{relative_path}': {str(e)}"
 
 
 # ---------------------------------------------------------
@@ -172,15 +182,22 @@ available_functions = {
 # 3. Execution Engine
 # ---------------------------------------------------------
 def process_agent_turn(client: OpenAI, messages: list, tool_choice="auto"):
-  """Handles LLM calls and executes tool chaining until the model produces a final text output."""
+  """Handles LLM calls and executes tool chaining sequentially until the model produces a text response."""
+  current_tool_choice = tool_choice
+
   while True:
     response = client.chat.completions.create(
         model="local-model",
         messages=messages,
         tools=tools,
-        tool_choice=tool_choice,
+        tool_choice=current_tool_choice,
         temperature=0.7,
+        parallel_tool_calls=False,  # Enforce single sequential tool calls
     )
+
+    # Revert tool_choice back to auto immediately after the first turn
+    current_tool_choice = "auto"
+
     response_msg = response.choices[0].message
     messages.append(response_msg)
 
@@ -188,19 +205,26 @@ def process_agent_turn(client: OpenAI, messages: list, tool_choice="auto"):
       for tool_call in response_msg.tool_calls:
         func_name = tool_call.function.name
         func_to_call = available_functions.get(func_name)
-        func_args = json.loads(tool_call.function.arguments)
+
+        try:
+          func_args = json.loads(tool_call.function.arguments)
+        except Exception:
+          func_args = {}
 
         print(f"🤖 [Agent Executing Tool]: {func_name}({func_args})")
+
         if func_to_call:
           tool_output = func_to_call(**func_args)
-          messages.append({
-              "tool_call_id": tool_call.id,
-              "role": "tool",
-              "name": func_name,
-              "content": tool_output,
-          })
-      # Switch back to automatic tool choice after forced initial turn
-      tool_choice = "auto"
+        else:
+          tool_output = f"Error: Function '{func_name}' is not recognized."
+
+        # Always append tool result back into conversation history
+        messages.append({
+            "tool_call_id": tool_call.id,
+            "role": "tool",
+            "name": func_name,
+            "content": str(tool_output),
+        })
     else:
       return response_msg.content
 
@@ -219,8 +243,8 @@ def run_chat_loop():
       "and save (`save_note_to_disk`) markdown notes on disk. "
       "When asked to load the knowledge base into memory, first list all"
       " available files, "
-      "then read their contents so you have context for subsequent user"
-      " prompts. "
+      "then read their contents sequentially so you have context for"
+      " subsequent user prompts. "
       "NEVER call `save_note_to_disk` unless the user explicitly requests to"
       " save, log, or archive."
   )
@@ -243,20 +267,14 @@ def run_chat_loop():
     messages.append({
         "role": "user",
         "content": (
-            "Please discover all available markdown files in the knowledge"
-            " base and read their contents into memory so we can discuss them."
+            "Please call `list_context_files` to discover all available"
+            " markdown files in the knowledge base, and then call"
+            " `read_context_file` to read their contents into memory so we"
+            " can discuss them."
         ),
     })
 
-    # Trigger agentic turn; forcing list_context_files starts the chain
-    agent_ack = process_agent_turn(
-        client,
-        messages,
-        tool_choice={
-            "type": "function",
-            "function": {"name": "list_context_files"},
-        },
-    )
+    agent_ack = process_agent_turn(client, messages, tool_choice="required")
     print(f"\nAI: {agent_ack}")
 
   print("\n" + "-" * 60)
